@@ -5,6 +5,9 @@ This High level Analyzer is displaying information that is exchanged between an 
 It will decode (as much as possible) the data that is read/written to a register on the MCP9600. With data that is read from the MCP9600
 the register, it will try to decode what is known or else the raw received data is displayed.
 
+October 2022, version 1.0.1
+* Couple of cosmetic changes and erata cleared
+
 October 2022, version 1.0.0
 Paul van Haastrecht
 
@@ -54,7 +57,7 @@ MCP9600_Registers = {
     '0x11': 'ALERT2_LIMIT: ',
     '0x12': 'ALERT3_LIMIT: ',
     '0x13': 'ALERT4_LIMIT: ',
-    '0x20': 'DEVICE_ID: ',
+    '0x20': 'DEVICE_ID: ',                # read only
 }
 
 ''' JUNC_TEMP '''
@@ -84,7 +87,7 @@ Thermocouple_Resolution = {
 Burst_Sample = {
     0b000: 'SAMPLES_1',
     0b001: 'SAMPLES_2',
-    0b010: 'SAMPLES_3',
+    0b010: 'SAMPLES_4',
     0b011: 'SAMPLES_8',
     0b100: 'SAMPLES_16',
     0b101: 'SAMPLES_32',
@@ -106,6 +109,12 @@ class Hla(HighLevelAnalyzer):
             "ping": {
                 'format': 'Ping: {{{data.address}}}'
             },
+            "pingERR": {
+                'format': 'PingERR: {{{data.address}}}'
+            },
+            "ReadErr": {
+                'format': 'ReadErr: {{{data.address}}}'
+            },
             "hi2c": {
                 'format': '{{data.description}} {{data.action}} [ {{data.data}} ]'
             },
@@ -120,11 +129,10 @@ class Hla(HighLevelAnalyzer):
     temp_frame = None               # Working frame to build output
     register_type = None            # holds the register read or written
     data_byte = 0                   # holds the most recent data read
-    Maybe_reading = False           # True : Assume a register read request was send
+    ObtainMode = False              # True : Assume a register read request was send
     data_unknown = True             # True : No additional data received (indicating read request)
     request_register_type = None    # Hold a register that has an assumed read requested pending
 
-    Cold_RESOLUTION = DEV_RESOLUTION # could be set differently for the ambient/cold_junc with device configuration
     reg_data = 0                    # needed to read 16/32-bit registers
     reg_count = 0                   # needed to read 16/32-bit registers
 
@@ -159,12 +167,14 @@ class Hla(HighLevelAnalyzer):
         if frame.type == "address":
             address_byte = frame.data["address"][0]
             self.temp_frame.data["address"] = hex(address_byte)
+            self.temp_frame.data["read"] = frame.data["read"]
+            self.temp_frame.data["ack"] = frame.data["ack"]     # true if ACK else NACK
 
         if frame.type == "data":
             self.data_byte = frame.data["data"][0]
 
             # if waiting on responds from an assumed read request
-            if self.Maybe_reading == True:
+            if self.ObtainMode == True:
                 # restore the saved register to (potentially) decode the responds
                 self.register_type = self.request_register_type
 
@@ -244,32 +254,48 @@ class Hla(HighLevelAnalyzer):
             self.temp_frame.end_time = frame.end_time
 
             # if we had a read request before (single register) assume this is a responds on the read request
-            if self.Maybe_reading == True:
+            if self.ObtainMode == True:
                 desc = self.temp_frame.data["description"]
                 self.temp_frame.data["description"] = ""
                 self.add_description("Responds:")
                 self.add_description(desc)
-                self.Maybe_reading = False
+                self.ObtainMode = False
 
                 new_frame = self.temp_frame
 
             # No data received in this frame
             elif self.data_unknown == True:
 
-                # if only the address was received. assume a 'I2C-ping' to test the device is there
+                # if only the I2C-address was received.
                 if self.register_type == None:
 
-                    new_frame = AnalyzerFrame("ping", self.temp_frame.start_time, frame.end_time, {
-                    "address": self.temp_frame.data["address"],
+                    # if only the address was received. assume a 'I2C-ping' to test the device is there
+                    # only the first PING is acknowledged by the MCP9600
+                    if self.temp_frame.data["ack"] == True:
+                        new_frame = AnalyzerFrame("ping", self.temp_frame.start_time, frame.end_time, {
+                            "address": self.temp_frame.data["address"],
                         }
                     )
-
-                # if only ONE byte assume this is a register read request
+                    # the next I2c_address + write BIT AND the first I2C_address + read BIT after a PING gets a NACK
+                    else:
+                        # In case of a read and NO bytes.. that is an error
+                        if self.temp_frame.data["read"] == True:
+                            new_frame = AnalyzerFrame("ReadErr", self.temp_frame.start_time, frame.end_time, {
+                            "address": self.temp_frame.data["address"],
+                            }
+                        )
+                        # An I2C address + write attempt that did not succesfull
+                        else:
+                            new_frame = AnalyzerFrame("pingERR", self.temp_frame.start_time, frame.end_time, {
+                            "address": self.temp_frame.data["address"],
+                            }
+                        )
+                # so we did get a byte and if only ONE byte assume this is a register read request
                 else:
                     self.add_description("Obtain ")
                     self.add_register(self.register_type)
                     self.request_register_type = self.register_type
-                    self.Maybe_reading = True
+                    self.ObtainMode = True
 
                     new_frame = AnalyzerFrame("read", self.temp_frame.start_time, frame.end_time, {
                         "address": self.temp_frame.data["address"],
@@ -279,7 +305,7 @@ class Hla(HighLevelAnalyzer):
             # this is a "normal" write to a register
             else:
                 new_frame = self.temp_frame
-                self.Maybe_reading = False
+                self.ObtainMode = False
 
             # reset different variables
             self.data_unknown = True
@@ -329,10 +355,10 @@ class Hla(HighLevelAnalyzer):
 
             self.add_register(self.register_type)
 
-            # for cold/ambient the Resolution could be set differently in Device config
-            # the datasheet is confusing. It instrucs to divide by 16 (= * 0.0625), but then
-            # again this COULD be changed in the DeviceConfig register with bit 7
-            Temp = self.reg_data * self.Cold_RESOLUTION
+            # The Ambient register contains the thermocouple cold-junction temperature or the device ambient temperature
+            # data. Bits 1 and 0 may remain clear (‘0’) depending on the status of the Resolution setting, bit 7 of
+            # Device Config register. As such the resolution calculation stays the same  * 0.0625
+            Temp = self.reg_data * DEV_RESOLUTION
 
             # if sign bit(s) is set, the temperature is negative
             if self.reg_data & 0x80:
@@ -473,17 +499,15 @@ class Hla(HighLevelAnalyzer):
 
         self.add_register(self.register_type)
 
-        self.add_action("Resolution: ")
+        self.add_action("Cold Res: ")
 
         # ambient / cold resolution
         if data_byte & 0x80:
             self.temp_frame.data["action"] += "0.25"
-            Cold_RESOLUTION = 0.25
         else:
             self.temp_frame.data["action"] += "0.0625"
-            Cold_RESOLUTION = 0.0625
 
-        self.add_action("ADC: ")
+        self.add_action("Hot Res: ")
         res = (data_byte >> 5) & 0x3
         if res in Thermocouple_Resolution:
             self.temp_frame.data["action"] += Thermocouple_Resolution[res]
@@ -549,16 +573,24 @@ class Hla(HighLevelAnalyzer):
         self.add_register(self.register_type)
 
         if (data_byte & 0x01):
-            self.add_action("Alert1")
+            self.add_action("TX > AL1")
+        else:
+            self.add_action("TX < AL1")
 
         if (data_byte & 0x02):
-            self.add_action("Alert2")
+            self.add_action("TX > AL2")
+        else:
+            self.add_action("TX < AL2")
 
         if (data_byte & 0x04):
-            self.add_action("Alert3")
+            self.add_action("TX > AL3")
+        else:
+            self.add_action("TX < AL3")
 
         if (data_byte & 0x8):
-            self.add_action("Alert4")
+            self.add_action("TX > AL4")
+        else:
+            self.add_action("TX < AL4")
 
         if (data_byte & 0x10):
             self.add_action("EMF error")

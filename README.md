@@ -30,6 +30,9 @@ If this analyser can not be selected through the [Saleae interface](https://supp
 
 ## Versioning
 
+### version 1.0.1 / October 2022
+ * Couple of cosmetic changes and erata cleared
+
 ### version 1.0.0 / October 2022
  * Initial version
 
