@@ -2,7 +2,7 @@
   "name": "MCP9600",
   "apiVersion": "1.0.0",
   "author": "paulvha",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "MCP9600 I2c communication",
   "extensions": {
     "MCP9600": {
